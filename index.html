@@ -83,7 +83,8 @@
 <script type="module">
 import {
   AutoModel,
-  AutoProcessor,
+  AutoTokenizer,
+  AutoImageProcessor,
   RawImage,
   env
 } from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
@@ -109,7 +110,8 @@ const results = $("results");
 const count = $("count");
 const resultInfo = $("resultInfo");
 
-let processor = null;
+let tokenizer = null;
+let imageProcessor = null;
 let model = null;
 let items = [];
 let loadingPromise = null;
@@ -125,7 +127,7 @@ function cosine(a, b) {
 }
 
 async function loadModel() {
-  if (model && processor) {
+  if (model && tokenizer && imageProcessor) {
     modelReady = true;
     return;
   }
@@ -140,7 +142,10 @@ async function loadModel() {
     progress.hidden = false;
     progress.value = 0;
 
-    processor = await AutoProcessor.from_pretrained(MODEL_ID);
+    // 將原本的 AutoProcessor 拆為 AutoTokenizer 與 AutoImageProcessor
+    // 避開載入未支援的 Gemma4AudioFeatureExtractor 模組
+    tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
+    imageProcessor = await AutoImageProcessor.from_pretrained(MODEL_ID);
     progress.value = .15;
 
     model = await AutoModel.from_pretrained(MODEL_ID, {
@@ -180,13 +185,16 @@ async function loadModel() {
 
 async function embedImage(file) {
   const image = await RawImage.fromBlob(file);
-  const inputs = await processor(null, image);
+  const inputs = await imageProcessor(image);
   const output = await model(inputs);
   return Array.from(output.sentence_embedding.data);
 }
 
 async function embedText(text) {
-  const inputs = await processor([`task: search result | query: ${text}`]);
+  const inputs = tokenizer([`task: search result | query: ${text}`], {
+    padding: true,
+    truncation: true
+  });
   const output = await model(inputs);
   return Array.from(output.sentence_embedding.data);
 }
@@ -311,3 +319,4 @@ downloadModel.addEventListener("click", () => {
 </script>
 </body>
 </html>
+
