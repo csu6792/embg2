@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EmbeddingGemma 2｜圖片語意搜尋</title>
+<style>
+  :root { font-family: system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans TC",sans-serif; color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0b0d12; color:#f4f5f7; }
+  .wrap { max-width:1100px; margin:auto; padding:32px 20px 60px; }
+  h1 { margin:0 0 8px; font-size:30px; }
+  .sub { color:#a8adb8; margin-bottom:24px; }
+  .panel { background:#141821; border:1px solid #272c37; border-radius:18px; padding:18px; margin-bottom:18px; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  button,input { font:inherit; }
+  button { border:0; border-radius:10px; padding:11px 15px; cursor:pointer; background:#fff; color:#111; font-weight:700; }
+  button.secondary { background:#272c37; color:#fff; }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  .search { display:flex; gap:10px; }
+  .search input { flex:1; min-width:220px; padding:13px 15px; border-radius:12px; border:1px solid #343a46; background:#0d1016; color:#fff; outline:none; }
+  .drop { border:1px dashed #4a5260; border-radius:14px; padding:25px; text-align:center; color:#aeb4bf; }
+  .drop.drag { border-color:#fff; background:#1b202a; }
+  .status { color:#aeb4bf; font-size:14px; margin-top:10px; min-height:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(190px,1fr)); gap:14px; }
+  .card { background:#0e1117; border:1px solid #292f3a; border-radius:14px; overflow:hidden; }
+  .card img { width:100%; aspect-ratio:1/1; object-fit:cover; display:block; background:#080a0e; }
+  .meta { padding:10px 12px 12px; }
+  .name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:13px; color:#d8dbe2; }
+  .score { font-size:18px; font-weight:800; margin-top:3px; }
+  .empty { color:#777e8b; text-align:center; padding:25px; }
+  .hint { color:#8e95a2; font-size:13px; line-height:1.6; }
+  progress { width:100%; height:8px; }
+  .pill { display:inline-block; padding:5px 9px; border-radius:999px; background:#242a35; color:#c8cdd7; font-size:12px; }
+  @media(max-width:600px){ .wrap{padding:22px 14px 40px}.search{flex-direction:column} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔎 EmbeddingGemma 2 圖片語意搜尋</h1>
+  <div class="sub">純前端 Demo：圖片不會上傳到伺服器，embedding 在你的瀏覽器本地計算。</div>
+
+  <div class="panel">
+    <div class="row">
+      <button id="downloadModel">⬇️ 下載模型</button>
+      <label>
+        <input id="files" type="file" accept="image/*" multiple hidden>
+        <button id="choose" disabled>📷 選擇圖片</button>
+      </label>
+      <button id="clear" class="secondary">清除圖片</button>
+      <span id="modelState" class="pill">模型未下載</span>
+      <span id="count" class="pill">0 張圖片</span>
+    </div>
+    <div id="drop" class="drop" style="margin-top:14px">也可以直接把圖片拖曳到這裡</div>
+    <div id="status" class="status">請先下載模型。下載完成後模型會快取在瀏覽器中。</div>
+    <progress id="progress" value="0" max="1" hidden></progress>
+  </div>
+
+  <div class="panel">
+    <div class="search">
+      <input id="query" placeholder="例如：海邊夕陽、狗在草地上、夜景、汽車……">
+      <button id="search" disabled>搜尋</button>
+    </div>
+    <div class="hint" style="margin-top:10px">
+      搜尋文字會和圖片 embedding 放在同一個 768 維向量空間中比較相似度。
+      建議使用自然語言描述圖片內容。模型只需下載一次，之後由瀏覽器快取。
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="row" style="justify-content:space-between;margin-bottom:12px">
+      <strong>搜尋結果</strong>
+      <span id="resultInfo" class="pill">尚未搜尋</span>
+    </div>
+    <div id="results" class="grid"><div class="empty">先加入圖片，再輸入搜尋文字。</div></div>
+  </div>
+
+  <div class="hint">
+    模型：onnx-community/embeddinggemma-2-ONNX · WebGPU 優先、WASM 備援 · q4
+  </div>
+</div>
+
+<script type="module">
+import {
+  AutoModel,
+  AutoProcessor,
+  RawImage,
+  env
+} from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+
+env.allowLocalModels = false;
+env.useBrowserCache = true;
+
+const MODEL_ID = "onnx-community/embeddinggemma-2-ONNX";
+
+const $ = id => document.getElementById(id);
+const files = $("files");
+const choose = $("choose");
+const clear = $("clear");
+const downloadModel = $("downloadModel");
+const chooseButton = $("choose");
+const modelState = $("modelState");
+const drop = $("drop");
+const status = $("status");
+const progress = $("progress");
+const query = $("query");
+const search = $("search");
+const results = $("results");
+const count = $("count");
+const resultInfo = $("resultInfo");
+
+let processor = null;
+let model = null;
+let items = [];
+let loadingPromise = null;
+let modelReady = false;
+
+function setStatus(msg) { status.textContent = msg; }
+
+function cosine(a, b) {
+  let sum = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) sum += a[i] * b[i];
+  return sum; // EmbeddingGemma 2 output is normalized.
+}
+
+async function loadModel() {
+  if (model && processor) {
+    modelReady = true;
+    return;
+  }
+  if (loadingPromise) return loadingPromise;
+
+  loadingPromise = (async () => {
+    const device = navigator.gpu ? "webgpu" : "wasm";
+    downloadModel.disabled = true;
+    chooseButton.disabled = true;
+    modelState.textContent = "下載/載入中…";
+    setStatus(`正在下載 EmbeddingGemma 2（${device === "webgpu" ? "WebGPU" : "WASM"}）……`);
+    progress.hidden = false;
+    progress.value = 0;
+
+    processor = await AutoProcessor.from_pretrained(MODEL_ID);
+    progress.value = .15;
+
+    model = await AutoModel.from_pretrained(MODEL_ID, {
+      device,
+      dtype: "q4",
+      progress_callback: p => {
+        if (typeof p?.progress === "number") {
+          progress.value = .15 + Math.min(1, p.progress / 100) * .85;
+        }
+      }
+    });
+
+    progress.value = 1;
+    modelReady = true;
+    modelState.textContent = "✓ 模型已就緒";
+    setStatus(`模型已就緒：${device === "webgpu" ? "WebGPU" : "WASM"} · q4。模型已由瀏覽器快取。`);
+    chooseButton.disabled = false;
+    search.disabled = items.length === 0;
+    downloadModel.textContent = "✓ 模型已下載";
+    downloadModel.disabled = true;
+    setTimeout(() => { progress.hidden = true; }, 700);
+  })().catch(err => {
+    progress.hidden = true;
+    modelReady = false;
+    modelState.textContent = "模型下載失敗";
+    downloadModel.disabled = false;
+    downloadModel.textContent = "⬇️ 重新下載模型";
+    setStatus("模型載入失敗：" + (err?.message || err));
+    console.error(err);
+    throw err;
+  }).finally(() => {
+    loadingPromise = null;
+  });
+
+  return loadingPromise;
+}
+
+async function embedImage(file) {
+  const image = await RawImage.fromBlob(file);
+  const inputs = await processor(null, image);
+  const output = await model(inputs);
+  return Array.from(output.sentence_embedding.data);
+}
+
+async function embedText(text) {
+  const inputs = await processor([`task: search result | query: ${text}`]);
+  const output = await model(inputs);
+  return Array.from(output.sentence_embedding.data);
+}
+
+function renderResults(list) {
+  if (!list.length) {
+    results.innerHTML = '<div class="empty">沒有結果。</div>';
+    return;
+  }
+  results.innerHTML = "";
+  for (const item of list) {
+    const card = document.createElement("div");
+    card.className = "card";
+    const img = document.createElement("img");
+    img.src = item.url;
+    img.alt = item.file.name;
+    const meta = document.createElement("div");
+    meta.className = "meta";
+    const name = document.createElement("div");
+    name.className = "name";
+    name.title = item.file.name;
+    name.textContent = item.file.name;
+    const score = document.createElement("div");
+    score.className = "score";
+    score.textContent = `${(item.score * 100).toFixed(1)}%`;
+    meta.append(name, score);
+    card.append(img, meta);
+    results.append(card);
+  }
+}
+
+async function addFiles(fileList) {
+  const selected = [...fileList].filter(f => f.type.startsWith("image/"));
+  if (!selected.length) return;
+
+  if (!modelReady) {
+    setStatus("請先下載模型。");
+    return;
+  }
+
+  for (const file of selected) {
+    setStatus(`正在分析：${file.name}`);
+    try {
+      const embedding = await embedImage(file);
+      items.push({
+        file,
+        embedding,
+        url: URL.createObjectURL(file)
+      });
+    } catch (err) {
+      console.error("圖片處理失敗", file.name, err);
+    }
+    count.textContent = `${items.length} 張圖片`;
+  }
+
+  setStatus(`完成。已建立 ${items.length} 張圖片的 embedding。`);
+  search.disabled = items.length === 0;
+  if (!query.value.trim()) {
+    renderResults(items.map(x => ({...x, score: 0})));
+  }
+}
+
+async function runSearch() {
+  const q = query.value.trim();
+  if (!q || !items.length) return;
+
+  search.disabled = true;
+  setStatus("正在把搜尋文字轉成 embedding……");
+
+  try {
+    if (!modelReady) await loadModel();
+    const qvec = await embedText(q);
+
+    const ranked = items.map(item => ({
+      ...item,
+      score: cosine(qvec, item.embedding)
+    })).sort((a,b) => b.score - a.score);
+
+    renderResults(ranked);
+    resultInfo.textContent = `${ranked.length} 個結果`;
+    setStatus("搜尋完成。");
+  } catch (err) {
+    console.error(err);
+    setStatus("搜尋失敗：" + (err?.message || err));
+  } finally {
+    search.disabled = false;
+  }
+}
+
+choose.addEventListener("click", () => files.click());
+files.addEventListener("change", e => addFiles(e.target.files));
+
+drop.addEventListener("dragover", e => {
+  e.preventDefault();
+  drop.classList.add("drag");
+});
+drop.addEventListener("dragleave", () => drop.classList.remove("drag"));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  drop.classList.remove("drag");
+  addFiles(e.dataTransfer.files);
+});
+
+clear.addEventListener("click", () => {
+  for (const item of items) URL.revokeObjectURL(item.url);
+  items = [];
+  count.textContent = "0 張圖片";
+  resultInfo.textContent = "尚未搜尋";
+  search.disabled = true;
+  results.innerHTML = '<div class="empty">先加入圖片，再輸入搜尋文字。</div>';
+  setStatus(model ? "模型已就緒。" : "模型尚未載入。");
+});
+
+search.addEventListener("click", runSearch);
+query.addEventListener("keydown", e => {
+  if (e.key === "Enter") runSearch();
+});
+
+downloadModel.addEventListener("click", () => {
+  loadModel().catch(() => {});
+});
+</script>
+</body>
+</html>
