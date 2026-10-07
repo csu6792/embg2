@@ -83,11 +83,10 @@
 <script type="module">
 import {
   AutoModel,
-  AutoTokenizer,
-  AutoImageProcessor,
+  AutoProcessor,
   RawImage,
   env
-} from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.8.1";
+} from "https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.1";
 
 env.allowLocalModels = false;
 env.useBrowserCache = true;
@@ -99,7 +98,6 @@ const files = $("files");
 const choose = $("choose");
 const clear = $("clear");
 const downloadModel = $("downloadModel");
-const chooseButton = $("choose");
 const modelState = $("modelState");
 const drop = $("drop");
 const status = $("status");
@@ -110,8 +108,7 @@ const results = $("results");
 const count = $("count");
 const resultInfo = $("resultInfo");
 
-let tokenizer = null;
-let imageProcessor = null;
+let processor = null;
 let model = null;
 let items = [];
 let loadingPromise = null;
@@ -123,11 +120,11 @@ function cosine(a, b) {
   let sum = 0;
   const n = Math.min(a.length, b.length);
   for (let i = 0; i < n; i++) sum += a[i] * b[i];
-  return sum; // EmbeddingGemma 2 output is normalized.
+  return sum; // EmbeddingGemma 2 輸出已正規化
 }
 
 async function loadModel() {
-  if (model && tokenizer && imageProcessor) {
+  if (model && processor) {
     modelReady = true;
     return;
   }
@@ -136,24 +133,26 @@ async function loadModel() {
   loadingPromise = (async () => {
     const device = navigator.gpu ? "webgpu" : "wasm";
     downloadModel.disabled = true;
-    chooseButton.disabled = true;
+    choose.disabled = true;
     modelState.textContent = "下載/載入中…";
     setStatus(`正在下載 EmbeddingGemma 2（${device === "webgpu" ? "WebGPU" : "WASM"}）……`);
     progress.hidden = false;
     progress.value = 0;
 
-    // 將原本的 AutoProcessor 拆為 AutoTokenizer 與 AutoImageProcessor
-    // 避開載入未支援的 Gemma4AudioFeatureExtractor 模組
-    tokenizer = await AutoTokenizer.from_pretrained(MODEL_ID);
-    imageProcessor = await AutoImageProcessor.from_pretrained(MODEL_ID);
-    progress.value = .15;
+    // 官方建議：用 AutoProcessor（不要拆成 Tokenizer + ImageProcessor）
+    processor = await AutoProcessor.from_pretrained(MODEL_ID);
+    progress.value = 0.15;
 
+    // 若只要圖片+文字，可關掉 audio 以減少下載量
+    // const config = await AutoConfig.from_pretrained(MODEL_ID);
+    // config.audio_config = null;
     model = await AutoModel.from_pretrained(MODEL_ID, {
       device,
-      dtype: "q4",
+      dtype: "q4", // 瀏覽器推薦 q4
+      // config,   // 若上面關掉 audio 就傳 config
       progress_callback: p => {
         if (typeof p?.progress === "number") {
-          progress.value = .15 + Math.min(1, p.progress / 100) * .85;
+          progress.value = 0.15 + Math.min(1, p.progress / 100) * 0.85;
         }
       }
     });
@@ -162,7 +161,7 @@ async function loadModel() {
     modelReady = true;
     modelState.textContent = "✓ 模型已就緒";
     setStatus(`模型已就緒：${device === "webgpu" ? "WebGPU" : "WASM"} · q4。模型已由瀏覽器快取。`);
-    chooseButton.disabled = false;
+    choose.disabled = false;
     search.disabled = items.length === 0;
     downloadModel.textContent = "✓ 模型已下載";
     downloadModel.disabled = true;
@@ -185,18 +184,17 @@ async function loadModel() {
 
 async function embedImage(file) {
   const image = await RawImage.fromBlob(file);
-  const inputs = await imageProcessor(image);
-  const output = await model(inputs);
-  return Array.from(output.sentence_embedding.data);
+  // processor(text, images, audio, videos) — 圖片用第二個參數
+  const inputs = await processor(null, image);
+  const { sentence_embedding } = await model(inputs);
+  return Array.from(sentence_embedding.data);
 }
 
 async function embedText(text) {
-  const inputs = tokenizer([`task: search result | query: ${text}`], {
-    padding: true,
-    truncation: true
-  });
-  const output = await model(inputs);
-  return Array.from(output.sentence_embedding.data);
+  // 非對稱搜尋要加 task prefix
+  const inputs = await processor([`task: search result | query: ${text}`]);
+  const { sentence_embedding } = await model(inputs);
+  return Array.from(sentence_embedding.data);
 }
 
 function renderResults(list) {
@@ -246,6 +244,7 @@ async function addFiles(fileList) {
       });
     } catch (err) {
       console.error("圖片處理失敗", file.name, err);
+      setStatus(`圖片處理失敗：${file.name} — ${err?.message || err}`);
     }
     count.textContent = `${items.length} 張圖片`;
   }
@@ -253,7 +252,7 @@ async function addFiles(fileList) {
   setStatus(`完成。已建立 ${items.length} 張圖片的 embedding。`);
   search.disabled = items.length === 0;
   if (!query.value.trim()) {
-    renderResults(items.map(x => ({...x, score: 0})));
+    renderResults(items.map(x => ({ ...x, score: 0 })));
   }
 }
 
@@ -271,7 +270,7 @@ async function runSearch() {
     const ranked = items.map(item => ({
       ...item,
       score: cosine(qvec, item.embedding)
-    })).sort((a,b) => b.score - a.score);
+    })).sort((a, b) => b.score - a.score);
 
     renderResults(ranked);
     resultInfo.textContent = `${ranked.length} 個結果`;
